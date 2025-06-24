@@ -327,6 +327,8 @@ class EnhancedLayerDetector:
         
         return missing
 
+
+'''
 class GerberParser:
     """Simple Gerber file parser"""
     
@@ -463,6 +465,7 @@ class GerberParser:
         y_coords = [g['y'] for g in self.geometries]
         
         return (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
+'''
 
 class DrillParser:
     """Simple Excellon drill file parser"""
@@ -537,6 +540,8 @@ class DrillParser:
             
             self.holes.append(DrillHole(x, y, diameter))
 
+
+'''
 class LayerVisualizer:
     """Create visualizations of PCB layers"""
     
@@ -635,15 +640,458 @@ class LayerVisualizer:
                                aperture['size1'], aperture['size2'],
                                color=color, alpha=0.8)
                 ax.add_patch(rect)
+'''
 
+
+class EnhancedGerberParser:
+    """Enhanced Gerber file parser with better geometry extraction"""
+    
+    def __init__(self, layer_detector: EnhancedLayerDetector):
+        self.apertures = {}
+        self.current_aperture = None
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.previous_x = 0.0
+        self.previous_y = 0.0
+        self.geometries = []
+        self.units = 'mm'
+        self.format_spec = (3, 3)  # Default format
+        self.layer_detector = layer_detector
+        self.interpolation_mode = 'linear'
+        self.coordinate_format = 'absolute'
+        self.zero_omission = 'leading'
+    
+    def parse_file(self, filepath: str) -> PCBLayer:
+        """Parse a Gerber file and return a PCBLayer object"""
+        self.apertures = {}
+        self.geometries = []
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.previous_x = 0.0
+        self.previous_y = 0.0
+        
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+        except:
+            with open(filepath, 'r', encoding='latin-1') as f:
+                content = f.read()
+        
+        lines = content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('%'):
+                if line.startswith('%'):
+                    self._parse_extended_command(line)
+                continue
+                
+            self._parse_line(line)
+        
+        # Calculate bounds
+        bounds = self._calculate_bounds()
+        
+        # Use enhanced layer detection
+        layer_type, description = self.layer_detector.detect_layer_type(filepath, content)
+        
+        return PCBLayer(
+            name=os.path.basename(filepath),
+            type=layer_type,
+            filename=filepath,
+            apertures=self.apertures,
+            geometries=self.geometries,
+            bounds=bounds,
+            description=description
+        )
+    
+    def _parse_extended_command(self, line: str):
+        """Parse extended commands (those starting with %)"""
+        # Aperture definition
+        if line.startswith('%ADD'):
+            self._parse_aperture_definition(line)
+        
+        # Format specification
+        elif line.startswith('%FSLAX') or line.startswith('%FSLAY'):
+            self._parse_format_spec(line)
+        
+        # Units
+        elif line.startswith('%MOMM'):
+            self.units = 'mm'
+        elif line.startswith('%MOIN'):
+            self.units = 'inch'
+        
+        # Load polarity
+        elif line.startswith('%LPD'):
+            pass  # Dark polarity (default)
+        elif line.startswith('%LPC'):
+            pass  # Clear polarity
+    
+    def _parse_line(self, line: str):
+        """Parse a single line of Gerber code"""
+        # Skip empty lines and comments
+        if not line or line.startswith('G04'):
+            return
+        
+        # Aperture selection
+        if re.match(r'^D\d+\*?$', line):
+            aperture_code = line.rstrip('*')
+            if aperture_code in self.apertures:
+                self.current_aperture = aperture_code
+            return
+        
+        # Interpolation mode
+        if line.startswith('G01'):
+            self.interpolation_mode = 'linear'
+        elif line.startswith('G02'):
+            self.interpolation_mode = 'clockwise_arc'
+        elif line.startswith('G03'):
+            self.interpolation_mode = 'counterclockwise_arc'
+        
+        # Coordinate and operation
+        if 'X' in line or 'Y' in line or line.endswith('D01*') or line.endswith('D02*') or line.endswith('D03*'):
+            self._parse_coordinate_line(line)
+    
+    def _parse_aperture_definition(self, line: str):
+        """Parse aperture definition like %ADD10C,0.152400*%"""
+        # Remove % and * characters
+        line = line.strip('%*')
+        
+        # Match different aperture types
+        circle_match = re.match(r'ADD(\d+)C,([\d.]+)(?:X([\d.]+))?', line)
+        rect_match = re.match(r'ADD(\d+)R,([\d.]+)X([\d.]+)(?:X([\d.]+))?', line)
+        obround_match = re.match(r'ADD(\d+)O,([\d.]+)X([\d.]+)(?:X([\d.]+))?', line)
+        polygon_match = re.match(r'ADD(\d+)P,([\d.]+)X(\d+)(?:X([\d.]+))?', line)
+        
+        if circle_match:
+            aperture_id = f"D{circle_match.group(1)}"
+            diameter = float(circle_match.group(2))
+            hole_diameter = float(circle_match.group(3)) if circle_match.group(3) else 0
+            
+            self.apertures[aperture_id] = {
+                'shape': 'circle',
+                'size1': diameter,
+                'size2': diameter,
+                'hole_diameter': hole_diameter
+            }
+        
+        elif rect_match:
+            aperture_id = f"D{rect_match.group(1)}"
+            width = float(rect_match.group(2))
+            height = float(rect_match.group(3))
+            hole_diameter = float(rect_match.group(4)) if rect_match.group(4) else 0
+            
+            self.apertures[aperture_id] = {
+                'shape': 'rectangle',
+                'size1': width,
+                'size2': height,
+                'hole_diameter': hole_diameter
+            }
+        
+        elif obround_match:
+            aperture_id = f"D{obround_match.group(1)}"
+            width = float(obround_match.group(2))
+            height = float(obround_match.group(3))
+            hole_diameter = float(obround_match.group(4)) if obround_match.group(4) else 0
+            
+            self.apertures[aperture_id] = {
+                'shape': 'obround',
+                'size1': width,
+                'size2': height,
+                'hole_diameter': hole_diameter
+            }
+        
+        elif polygon_match:
+            aperture_id = f"D{polygon_match.group(1)}"
+            diameter = float(polygon_match.group(2))
+            vertices = int(polygon_match.group(3))
+            rotation = float(polygon_match.group(4)) if polygon_match.group(4) else 0
+            
+            self.apertures[aperture_id] = {
+                'shape': 'polygon',
+                'size1': diameter,
+                'size2': diameter,
+                'vertices': vertices,
+                'rotation': rotation
+            }
+    
+    def _parse_format_spec(self, line: str):
+        """Parse format specification like %FSLAX23Y23*%"""
+        # Extract format information
+        if 'X' in line and 'Y' in line:
+            x_match = re.search(r'X(\d)(\d)', line)
+            if x_match:
+                integer_places = int(x_match.group(1))
+                decimal_places = int(x_match.group(2))
+                self.format_spec = (integer_places, decimal_places)
+        
+        # Determine zero omission
+        if 'L' in line:
+            self.zero_omission = 'leading'
+        elif 'T' in line:
+            self.zero_omission = 'trailing'
+        
+        # Determine coordinate format
+        if 'A' in line:
+            self.coordinate_format = 'absolute'
+        elif 'I' in line:
+            self.coordinate_format = 'incremental'
+    
+    def _parse_coordinate_line(self, line: str):
+        """Parse coordinate and drawing commands"""
+        # Store previous position
+        self.previous_x = self.current_x
+        self.previous_y = self.current_y
+        
+        # Extract coordinates
+        x_match = re.search(r'X([-+]?\d+)', line)
+        y_match = re.search(r'Y([-+]?\d+)', line)
+        
+        if x_match:
+            x_val = int(x_match.group(1))
+            self.current_x = self._convert_coordinate(x_val)
+        
+        if y_match:
+            y_val = int(y_match.group(1))
+            self.current_y = self._convert_coordinate(y_val)
+        
+        # Handle operations
+        if line.endswith('D01*'):  # Interpolate (draw)
+            self._add_line_geometry()
+        elif line.endswith('D02*'):  # Move
+            pass  # Just update position, no drawing
+        elif line.endswith('D03*'):  # Flash
+            self._add_flash_geometry()
+    
+    def _convert_coordinate(self, raw_value: int) -> float:
+        """Convert raw coordinate value to actual coordinate"""
+        # Apply format specification
+        divisor = 10 ** self.format_spec[1]
+        coordinate = raw_value / divisor
+        
+        # Convert units if necessary
+        if self.units == 'inch':
+            coordinate *= 25.4  # Convert to mm
+        
+        return coordinate
+    
+    def _add_line_geometry(self):
+        """Add line geometry from previous position to current position"""
+        if self.current_aperture and self.current_aperture in self.apertures:
+            # Only add if we have moved
+            if (abs(self.current_x - self.previous_x) > 0.001 or 
+                abs(self.current_y - self.previous_y) > 0.001):
+                
+                self.geometries.append({
+                    'operation': 'line',
+                    'x1': self.previous_x,
+                    'y1': self.previous_y,
+                    'x2': self.current_x,
+                    'y2': self.current_y,
+                    'aperture': self.current_aperture
+                })
+    
+    def _add_flash_geometry(self):
+        """Add flash geometry at current position"""
+        if self.current_aperture and self.current_aperture in self.apertures:
+            self.geometries.append({
+                'operation': 'flash',
+                'x': self.current_x,
+                'y': self.current_y,
+                'aperture': self.current_aperture
+            })
+    
+    def _calculate_bounds(self) -> Tuple[float, float, float, float]:
+        """Calculate the bounding box of all geometries"""
+        if not self.geometries:
+            return (0, 0, 0, 0)
+        
+        x_coords = []
+        y_coords = []
+        
+        for geom in self.geometries:
+            if geom['operation'] == 'flash':
+                x_coords.append(geom['x'])
+                y_coords.append(geom['y'])
+            elif geom['operation'] == 'line':
+                x_coords.extend([geom['x1'], geom['x2']])
+                y_coords.extend([geom['y1'], geom['y2']])
+        
+        if not x_coords:
+            return (0, 0, 0, 0)
+        
+        return (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
+
+class EnhancedLayerVisualizer:
+    """Enhanced visualizer for better PCB layer rendering"""
+    
+    def __init__(self, layer_detector: EnhancedLayerDetector):
+        self.layer_detector = layer_detector
+    
+    def render_layer(self, layer: PCBLayer, width: int = 800, height: int = 600) -> str:
+        """Render a PCB layer with enhanced visualization"""
+        fig, ax = plt.subplots(figsize=(width/100, height/100), dpi=100)
+        
+        color = self.layer_detector.get_layer_color(layer.type)
+        background_color = self._get_background_color(layer.type)
+        
+        # Render geometries
+        for geom in layer.geometries:
+            self._render_enhanced_geometry(ax, geom, layer.apertures, color)
+        
+        # Set bounds with padding
+        if layer.bounds != (0, 0, 0, 0):
+            min_x, min_y, max_x, max_y = layer.bounds
+            # Add 10% padding
+            width_padding = (max_x - min_x) * 0.1
+            height_padding = (max_y - min_y) * 0.1
+            ax.set_xlim(min_x - width_padding, max_x + width_padding)
+            ax.set_ylim(min_y - height_padding, max_y + height_padding)
+        else:
+            # Default bounds if no geometry
+            ax.set_xlim(-10, 10)
+            ax.set_ylim(-10, 10)
+        
+        ax.set_aspect('equal')
+        ax.set_facecolor(background_color)
+        ax.axis('off')
+        
+        # Add title
+        plt.title(f"{layer.description} ({len(layer.geometries)} features)", 
+                 color='white', fontsize=10, pad=20)
+        
+        plt.tight_layout()
+        
+        # Convert to base64
+        buffer = BytesIO()
+        plt.savefig(buffer, format='png', bbox_inches='tight', 
+                   facecolor=background_color, edgecolor='none', dpi=150)
+        buffer.seek(0)
+        image_base64 = base64.b64encode(buffer.getvalue()).decode()
+        plt.close(fig)
+        
+        return image_base64
+    
+    def _get_background_color(self, layer_type: str) -> str:
+        """Get appropriate background color for layer type"""
+        backgrounds = {
+            'copper_top': '#1a1a1a',      # Dark for copper
+            'copper_bottom': '#1a1a1a',   # Dark for copper
+            'copper_inner': '#1a1a1a',    # Dark for copper
+            'soldermask_top': '#0d4d0d',  # Dark green for soldermask
+            'soldermask_bottom': '#0d4d0d',
+            'silkscreen_top': '#1a4d1a',  # Medium green for silkscreen
+            'silkscreen_bottom': '#1a4d1a',
+            'paste_top': '#2d2d2d',       # Dark gray for paste
+            'paste_bottom': '#2d2d2d',
+            'outline': '#ffffff',         # White for outline
+            'drill': '#1a4d1a',          # Green for drill
+        }
+        return backgrounds.get(layer_type, '#1a1a1a')
+    
+    def _render_enhanced_geometry(self, ax, geometry: Dict[str, Any], 
+                                apertures: Dict[str, Any], color: str):
+        """Render geometry with enhanced visualization"""
+        aperture_id = geometry.get('aperture')
+        if not aperture_id or aperture_id not in apertures:
+            return
+        
+        aperture = apertures[aperture_id]
+        
+        if geometry['operation'] == 'flash':
+            self._render_flash(ax, geometry, aperture, color)
+        elif geometry['operation'] == 'line':
+            self._render_line(ax, geometry, aperture, color)
+    
+    def _render_flash(self, ax, geometry: Dict[str, Any], 
+                     aperture: Dict[str, Any], color: str):
+        """Render a flash (pad) with proper shape"""
+        x, y = geometry['x'], geometry['y']
+        
+        if aperture['shape'] == 'circle':
+            radius = aperture['size1'] / 2
+            circle = Circle((x, y), radius, color=color, alpha=0.8, linewidth=0)
+            ax.add_patch(circle)
+            
+            # Add hole if present
+            if aperture.get('hole_diameter', 0) > 0:
+                hole_radius = aperture['hole_diameter'] / 2
+                hole = Circle((x, y), hole_radius, color='black', alpha=1.0)
+                ax.add_patch(hole)
+        
+        elif aperture['shape'] == 'rectangle':
+            width = aperture['size1']
+            height = aperture['size2']
+            rect = Rectangle((x - width/2, y - height/2), width, height,
+                           color=color, alpha=0.8, linewidth=0)
+            ax.add_patch(rect)
+            
+            # Add hole if present
+            if aperture.get('hole_diameter', 0) > 0:
+                hole_radius = aperture['hole_diameter'] / 2
+                hole = Circle((x, y), hole_radius, color='black', alpha=1.0)
+                ax.add_patch(hole)
+        
+        elif aperture['shape'] == 'obround':
+            width = aperture['size1']
+            height = aperture['size2']
+            
+            if width > height:
+                # Horizontal obround
+                rect_width = width - height
+                rect = Rectangle((x - rect_width/2, y - height/2), rect_width, height,
+                               color=color, alpha=0.8, linewidth=0)
+                ax.add_patch(rect)
+                
+                # Add semicircles
+                left_circle = Circle((x - rect_width/2, y), height/2, 
+                                   color=color, alpha=0.8, linewidth=0)
+                right_circle = Circle((x + rect_width/2, y), height/2, 
+                                    color=color, alpha=0.8, linewidth=0)
+                ax.add_patch(left_circle)
+                ax.add_patch(right_circle)
+            else:
+                # Vertical obround
+                rect_height = height - width
+                rect = Rectangle((x - width/2, y - rect_height/2), width, rect_height,
+                               color=color, alpha=0.8, linewidth=0)
+                ax.add_patch(rect)
+                
+                # Add semicircles
+                bottom_circle = Circle((x, y - rect_height/2), width/2, 
+                                     color=color, alpha=0.8, linewidth=0)
+                top_circle = Circle((x, y + rect_height/2), width/2, 
+                                  color=color, alpha=0.8, linewidth=0)
+                ax.add_patch(bottom_circle)
+                ax.add_patch(top_circle)
+    
+    def _render_line(self, ax, geometry: Dict[str, Any], 
+                    aperture: Dict[str, Any], color: str):
+        """Render a line (trace) with proper width"""
+        x1, y1 = geometry['x1'], geometry['y1']
+        x2, y2 = geometry['x2'], geometry['y2']
+        
+        # Get line width from aperture
+        if aperture['shape'] == 'circle':
+            linewidth = aperture['size1']
+        else:
+            linewidth = min(aperture['size1'], aperture['size2'])
+        
+        # Convert mm to points (approximate)
+        linewidth_points = linewidth * 2.83465  # 1mm ≈ 2.83 points
+        
+        ax.plot([x1, x2], [y1, y2], color=color, linewidth=linewidth_points, 
+                solid_capstyle='round', alpha=0.8)
+        
+
+        
 class PCBFileManager:
     """Manage PCB file operations"""
     
     def __init__(self):
         self.layer_detector = EnhancedLayerDetector()
-        self.gerber_parser = GerberParser(self.layer_detector)
+        self.gerber_parser = EnhancedGerberParser(self.layer_detector)
         self.drill_parser = DrillParser()
-        self.visualizer = LayerVisualizer(self.layer_detector)
+        self.visualizer = EnhancedLayerVisualizer(self.layer_detector)
     
     def allowed_file(self, filename: str) -> bool:
         """Check if file extension is allowed"""
@@ -799,8 +1247,20 @@ class PCBFileManager:
             'size': os.path.getsize(filepath) if os.path.exists(filepath) else 0
         }
 
+
+def create_enhanced_file_manager():
+    """Create file manager with enhanced parsers"""
+    class EnhancedPCBFileManager(PCBFileManager):
+        def __init__(self):
+            self.layer_detector = EnhancedLayerDetector()
+            self.gerber_parser = EnhancedGerberParser(self.layer_detector)  # Use enhanced parser
+            self.drill_parser = DrillParser()
+            self.visualizer = EnhancedLayerVisualizer(self.layer_detector)  # Use enhanced visualizer
+    
+    return EnhancedPCBFileManager()
+
 # Initialize file manager
-file_manager = PCBFileManager()
+file_manager = create_enhanced_file_manager()
 
 @app.route('/')
 def index():
