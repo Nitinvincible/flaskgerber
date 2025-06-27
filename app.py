@@ -35,7 +35,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 
 ALLOWED_EXTENSIONS = {
     'gbr', 'ger', 'gtl', 'gbl', 'gts', 'gbs', 'gto', 'gbo', 'gtp', 'gbp',
-    'drl', 'xln', 'txt', 'cnc', 'nc', 'tap',  # Drill files
+    'drl', 'xln', 'txt', 'cnc', 'nc', 'tap', 'DRL',  # Drill files
     'pnp', 'pos', 'xy',  # Pick and place
     'zip', 'rar',  # Archives
     'pcb', 'sch',  # PCB design files
@@ -1174,23 +1174,16 @@ class PCBFileManager:
         """Process a single PCB file"""
         filename = os.path.basename(filepath)
         file_ext = filename.lower().split('.')[-1]
-        
-        # First, detect the layer type using the enhanced detector
-        layer_type, description = self.layer_detector.detect_layer_type(filepath)
-        
-        if file_ext in ['drl', 'xln', 'txt', 'cnc', 'nc', 'tap'] or layer_type == 'drill':
-            # Try to parse as drill file
+
+        # Always try to parse as drill file first if extension matches
+        if file_ext in ['drl', 'xln', 'txt', 'cnc', 'nc', 'tap']:
             try:
                 holes = self.drill_parser.parse_file(filepath)
                 if holes:
-                    # Calculate bounds for drill file
                     x_coords = [h.x for h in holes]
                     y_coords = [h.y for h in holes]
                     bounds = (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
-                    
-                    # Generate visualization
                     image_data = self.visualizer.render_drill_layer(holes, bounds)
-                    
                     return {
                         'type': 'drill',
                         'filename': filename,
@@ -1201,20 +1194,30 @@ class PCBFileManager:
                     }
             except Exception as e:
                 pass  # Fall through to other file type
-        
+
+            # --- Here is where you would call the advanced parser if needed ---
+            # from drill_preview import parse_advanced_excellon, is_excellon_drill_file
+            # if is_excellon_drill_file(filepath):
+            #     holes = parse_advanced_excellon(filepath)
+            #     if holes:
+            #         # ...same as above, return drill file dict...
+
+        # Use enhanced detector for other types
+        layer_type, description = self.layer_detector.detect_layer_type(filepath)
+
         # Try to parse as Gerber file if it's detected as a PCB layer type
-        if layer_type in ['copper_top', 'copper_bottom', 'copper_inner', 'soldermask_top', 
-                          'soldermask_bottom', 'silkscreen_top', 'silkscreen_bottom', 
-                          'paste_top', 'paste_bottom', 'outline'] or file_ext in ['gbr', 'ger', 'gtl', 'gbl', 'gts', 'gbs', 'gto', 'gbo', 'gtp', 'gbp']:
+        if layer_type in [
+            'copper_top', 'copper_bottom', 'copper_inner', 'soldermask_top',
+            'soldermask_bottom', 'silkscreen_top', 'silkscreen_bottom',
+            'paste_top', 'paste_bottom', 'outline'
+        ] or file_ext in [
+            'gbr', 'ger', 'gtl', 'gbl', 'gts', 'gbs', 'gto', 'gbo', 'gtp', 'gbp'
+        ]:
             try:
                 layer = self.gerber_parser.parse_file(filepath)
-                # Always return as layer if detected as PCB layer type, even with no geometries
-                
-                # Generate visualization only if we have geometries
                 image_data = None
                 if layer.geometries:
                     image_data = self.visualizer.render_layer(layer)
-                
                 return {
                     'type': 'layer',
                     'filename': filename,
@@ -1226,7 +1229,6 @@ class PCBFileManager:
                     'image_data': image_data
                 }
             except Exception as e:
-                # If parsing fails but it's detected as a PCB layer, still return as layer
                 if layer_type != 'unknown':
                     return {
                         'type': 'layer',
@@ -1238,7 +1240,7 @@ class PCBFileManager:
                         'bounds': (0, 0, 0, 0),
                         'image_data': None
                     }
-        
+
         # Default to other file type
         return {
             'type': 'other',
@@ -1316,4 +1318,4 @@ def download_file(filename):
         return jsonify({'error': str(e)}), 404
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, use_reloader=False)
